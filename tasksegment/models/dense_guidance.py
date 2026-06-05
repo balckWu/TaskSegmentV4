@@ -33,7 +33,7 @@ class TextInducedDenseGuidance2D(nn.Module):
         in_channels: int,
         text_dim: int,
         guidance_dim: int = 256,
-        text_group_summary_count: int = 5,
+        text_group_summary_count: int = 3,
         norm_type: str = "group",
         group_norm_groups: int = 16,
     ):
@@ -70,6 +70,11 @@ class TextInducedDenseGuidance2D(nn.Module):
             nn.GELU(),
         )
 
+    def _split_summary_tokens(self, text_tokens: torch.Tensor) -> torch.Tensor:
+        if text_tokens.shape[1] <= self.group_summary_count:
+            return text_tokens
+        return text_tokens[:, :self.group_summary_count, :]
+
     def _split_fine_tokens(self, text_tokens: torch.Tensor) -> torch.Tensor:
         if text_tokens.shape[1] <= self.group_summary_count:
             return text_tokens
@@ -92,7 +97,12 @@ class TextInducedDenseGuidance2D(nn.Module):
 
         feat = self.feature_proj(image_feats)
         feat_norm = F.normalize(feat, dim=1)
-        prior_map = self._text_similarity_map(feat_norm, text_tokens.mean(dim=1))
+
+        # Use only the summary prefix tokens to form the coarse text prior.
+        # Fine-grained tokens still drive dense attention below, but they should
+        # not dilute the global target anchor used by the prior map.
+        summary_tokens = self._split_summary_tokens(text_tokens)
+        prior_map = self._text_similarity_map(feat_norm, summary_tokens.mean(dim=1))
 
         fine_tokens = self._split_fine_tokens(text_tokens)
         

@@ -31,7 +31,7 @@ class TaskSegmentModel(nn.Module):
         guidance_scale_min=0.50,
         guidance_scale_max=1.00,
         guidance_clamp_max=0.80,
-        text_group_summary_count=5,
+        text_group_summary_count=3,
     ):
         super().__init__()
         self.encoder = UNetEncoder2D(is_batchnorm=encoder_batchnorm)

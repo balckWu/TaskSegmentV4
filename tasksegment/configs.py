@@ -22,7 +22,7 @@ DEFAULT_MODEL_CONFIG = {
     "guidance_scale_min": 0.50,
     "guidance_scale_max": 1.00,
     "guidance_clamp_max": 0.80,
-    "text_group_summary_count": 5,
+    "text_group_summary_count": 3,
 }
 
 # 🌟 新增了 OTU 和 prostate 的 EMA 权重
