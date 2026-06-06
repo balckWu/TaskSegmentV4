@@ -97,12 +97,37 @@ class IrisMaskDecoder2D(nn.Module):
         self.guidance_clamp_max = float(guidance_clamp_max)
         self.text_group_summary_count = int(text_group_summary_count)
 
-        self.query_to_task = nn.MultiheadAttention(
+        # ====================================================================
+        # MDGA (Modality-Decoupled Gated Attention) - 模态解耦门控注意力初始化
+        # ====================================================================
+        
+        # 1. 视觉特征专用注意力
+        self.query_to_visual = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=num_heads,
             batch_first=True,
             dropout=dropout,
         )
+        
+        # 2. 文本特征专用注意力 & 门控融合机制
+        if self.use_ftext:
+            self.query_to_text = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                batch_first=True,
+                dropout=dropout,
+            )
+            # 通道级模态门控 (Channel-wise Modality Gate)
+            self.modality_gate = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Sigmoid()
+            )
+            # 初始化偏置为 1.0 (Sigmoid(1.0) ≈ 0.73)
+            # 保证训练初期网络天然更偏向文本先验，复现强大的假阳性抑制能力
+            nn.init.constant_(self.modality_gate[0].bias, 1.0)
+            
+        # ====================================================================
+
         self.query_norm = nn.LayerNorm(hidden_dim)
 
         self.task_summary_proj = nn.Sequential(
@@ -144,7 +169,7 @@ class IrisMaskDecoder2D(nn.Module):
         self.fg_token_weight = float(fg_token_weight)
 
     def _split_task_tokens(self, task_tokens):
-        foreground_token = task_tokens[:, 0, :]
+        foreground_token = task_tokens[:, 0:1, :]  # 修复维度保持: [B, 1, C]
         visual_start = 1
         visual_end = 1 + self.num_query_tokens
         visual_context_tokens = task_tokens[:, visual_start:visual_end, :]
@@ -165,21 +190,46 @@ class IrisMaskDecoder2D(nn.Module):
 
     def _summarize_task(self, task_tokens):
         foreground_token, visual_context_tokens, text_tokens = self._split_task_tokens(task_tokens)
+        foreground_token_squeeze = foreground_token.squeeze(1)
         visual_summary = (
             visual_context_tokens.mean(dim=1)
             if visual_context_tokens.shape[1] > 0
-            else foreground_token
+            else foreground_token_squeeze
         )
 
-        fused_summary = self.task_summary_proj(torch.cat([foreground_token, visual_summary], dim=1))
-        task_summary = self.fg_token_weight * foreground_token + (1.0 - self.fg_token_weight) * fused_summary
+        fused_summary = self.task_summary_proj(torch.cat([foreground_token_squeeze, visual_summary], dim=1))
+        task_summary = self.fg_token_weight * foreground_token_squeeze + (1.0 - self.fg_token_weight) * fused_summary
         return task_summary, text_tokens
 
     def forward(self, query_feats, task_tokens):
         bottleneck, skip1, skip2, skip3, skip4 = self._unpack_query_feats(query_feats)
         query_flat = bottleneck.flatten(2).transpose(1, 2)
 
-        query_update, _ = self.query_to_task(query_flat, task_tokens, task_tokens)
+        # ====================================================================
+        # MDGA 前向传播：视觉与文本分开 Attention，再动态 Gating 融合
+        # ====================================================================
+        
+        # 1. 分离视觉和文本 Tokens
+        fg_token, vis_ctx, text_tokens = self._split_task_tokens(task_tokens)
+        vis_tokens = torch.cat([fg_token, vis_ctx], dim=1)
+
+        # 2. 视觉交叉注意力
+        vis_update, _ = self.query_to_visual(query_flat, vis_tokens, vis_tokens)
+
+        # 3. 文本交叉注意力 & 门控融合
+        if self.use_ftext and text_tokens is not None and text_tokens.shape[1] > 0:
+            text_update, _ = self.query_to_text(query_flat, text_tokens, text_tokens)
+            
+            # 生成 [B, L, C] 的动态门控图，根据图像局部特征决定多依赖文本
+            gate = self.modality_gate(query_flat) 
+            
+            # 软融合：门控值越大，越依赖文本先验（起到过滤假阳性的作用）
+            query_update = (1.0 - gate) * vis_update + gate * text_update
+        else:
+            query_update = vis_update
+            
+        # ====================================================================
+
         query_flat = self.query_norm(query_flat + self.dropout(query_update))
         x = query_flat.transpose(1, 2).reshape_as(bottleneck)
         x = self.bottleneck_proj(x)

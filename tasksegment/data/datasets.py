@@ -148,7 +148,21 @@ class MultiOrganDataset(Dataset):
 
                 for img_name in img_files:
                     img_path = os.path.join(img_dir, img_name)
-                    mask_path = os.path.join(mask_dir, img_name)
+                    
+                    # 提取不带后缀的文件名 (例如 '123.jpg' 或 '123.JPG' 变成 '123')
+                    base_name, _ = os.path.splitext(img_name)
+                    
+                    # 灵活匹配掩码后缀 (支持 .png, .PNG 以及与其他数据集兼容的同名后缀)
+                    mask_path_png = os.path.join(mask_dir, f"{base_name}.png")
+                    mask_path_PNG_upper = os.path.join(mask_dir, f"{base_name}.PNG")
+                    mask_path_exact = os.path.join(mask_dir, img_name)
+                    
+                    if os.path.exists(mask_path_png):
+                        mask_path = mask_path_png
+                    elif os.path.exists(mask_path_PNG_upper):
+                        mask_path = mask_path_PNG_upper
+                    else:
+                        mask_path = mask_path_exact
 
                     if not os.path.exists(mask_path):
                         missing_mask_count += 1
@@ -222,12 +236,6 @@ class MultiOrganDataset(Dataset):
     ) -> Tuple[List[int], List[int]]:
         """
         Support 始终使用正样本；Query 采用“正样本 + 全样本/空掩码优先”的混采策略。
-
-        改进点：
-        1) 尽量保证 support / query 不重叠；
-        2) 只有在域内样本实在不足时，才允许回退到与 support 重叠的候选；
-        3) 在候选数量不足但仍有可用非重叠样本时，允许 query 在自身内部重复采样，
-           但仍优先保持与 support 不重叠。
         """
         pos_pool = list(self.organ_to_positive_indices.get(organ_name, []))
         all_pool = list(self.organ_to_indices.get(organ_name, []))
@@ -265,9 +273,7 @@ class MultiOrganDataset(Dataset):
         # ---------- step2: 补齐剩余 query，优先空掩码，再退回全样本 ----------
         if remaining_needed > 0:
             excluded = used_support if len([idx for idx in all_pool if idx not in used_support]) > 0 else set()
-            # 如果域内还存在非重叠样本，就严格排除 support；
-            # 只有在“除了 support 已经没有其它样本”时才允许回退。
-
+            
             fallback_candidates: List[int] = []
             if self.prefer_empty_queries:
                 empty_candidates = [idx for idx in empty_pool if idx not in excluded]
@@ -287,7 +293,6 @@ class MultiOrganDataset(Dataset):
                 fallback_candidates = all_candidates
 
             if len(fallback_candidates) == 0:
-                # 域内数据太少，无法再保持 support/query 完全去重
                 fallback_candidates = list(all_pool)
 
             query_indices.extend(
